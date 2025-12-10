@@ -3,7 +3,9 @@
     "allow": [
       "Bash(git init:*)",
       "Bash(git config:*)",
-      "Bash(git remote add:*)"
+      "Bash(git remote add:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\ndocs: 좌표계 및 데이터 융합 상세 설계 문서 추가\n\n- coordinate-system.md: 월드좌표계, LUT, 가중치 융합 상세 설명\n- overview.md: MCU ESP32→STM32F407 변경, 비용 $206→$204\n- KiCad 파일 정리 (중복 제거)\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n)\")"
     ]
   }
 }
