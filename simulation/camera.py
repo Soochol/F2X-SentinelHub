@@ -124,8 +124,10 @@ class Camera:
         fov_v_rad = np.radians(self.spec.fov_v)
 
         # 픽셀 중심 기준 각도
-        angle_h = (px - (self.spec.resolution_x - 1) / 2) / (self.spec.resolution_x - 1) * fov_h_rad
-        angle_v = (py - (self.spec.resolution_y - 1) / 2) / (self.spec.resolution_y - 1) * fov_v_rad
+        res_x_div = max(self.spec.resolution_x - 1, 1)
+        res_y_div = max(self.spec.resolution_y - 1, 1)
+        angle_h = (px - (self.spec.resolution_x - 1) / 2) / res_x_div * fov_h_rad
+        angle_v = (py - (self.spec.resolution_y - 1) / 2) / res_y_div * fov_v_rad
 
         # 광선 방향 벡터 (카메라 로컬 좌표계)
         # 카메라는 -Z 방향을 바라봄 (아래)

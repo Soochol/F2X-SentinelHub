@@ -6,15 +6,59 @@ IR Camera Coverage Simulation - Streamlit Web App
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
-from plotly.subplots import make_subplots
 import numpy as np
 import pandas as pd
+import json
+import hashlib
 from camera import (
     Camera, CameraSpec,
     calculate_coverage_map,
     calculate_resolution_map,
     auto_tilt_to_center
 )
+
+
+@st.cache_data
+def cached_resolution_map(_cameras_hash, battery_width, battery_height, grid_res, cameras_data):
+    """캐시된 해상도 맵 계산"""
+    cameras = []
+    for cam_data in cameras_data:
+        spec = CameraSpec(
+            resolution_x=cam_data['spec_rx'],
+            resolution_y=cam_data['spec_ry'],
+            fov_h=cam_data['spec_fov_h'],
+            fov_v=cam_data['spec_fov_v']
+        )
+        cam = Camera(
+            id=cam_data['id'],
+            x=cam_data['x'],
+            y=cam_data['y'],
+            z=cam_data['z'],
+            tilt_angle=cam_data['tilt_angle'],
+            tilt_direction=cam_data['tilt_direction'],
+            spec=spec
+        )
+        cameras.append(cam)
+    return calculate_resolution_map(cameras, battery_width, battery_height, grid_resolution=grid_res)
+
+
+def get_cameras_hash(cameras):
+    """카메라 설정의 해시값 생성"""
+    data = str([(c.id, c.x, c.y, c.z, c.tilt_angle, c.tilt_direction) for c in cameras])
+    return hashlib.md5(data.encode()).hexdigest()
+
+
+def cameras_to_data(cameras):
+    """카메라 객체를 직렬화 가능한 데이터로 변환"""
+    return [
+        {
+            'id': c.id, 'x': c.x, 'y': c.y, 'z': c.z,
+            'tilt_angle': c.tilt_angle, 'tilt_direction': c.tilt_direction,
+            'spec_rx': c.spec.resolution_x, 'spec_ry': c.spec.resolution_y,
+            'spec_fov_h': c.spec.fov_h, 'spec_fov_v': c.spec.fov_v
+        }
+        for c in cameras
+    ]
 
 # 페이지 설정
 st.set_page_config(
@@ -28,6 +72,8 @@ if 'cameras' not in st.session_state:
     st.session_state.cameras = []
 if 'next_camera_id' not in st.session_state:
     st.session_state.next_camera_id = 1
+if 'working_distance' not in st.session_state:
+    st.session_state.working_distance = 250
 
 # 사이드바 - 설정
 st.sidebar.title("⚙️ 설정")
@@ -138,337 +184,7 @@ st.title("🔥 IR 카메라 커버리지 시뮬레이터")
 st.caption("배터리 화재 감지용 MLX90640 카메라 배치 최적화")
 
 # 탭 구성
-tab1, tab2, tab3, tab4 = st.tabs(["📍 커버리지 맵", "🎯 3D 뷰", "📊 해상도 분석", "📋 상세 정보"])
-
-with tab1:
-    st.subheader("카메라 커버리지 & 해상도 시각화")
-
-    # 그리드 해상도 설정
-    grid_res = st.sidebar.slider("그리드 해상도 (mm)", 20, 100, 50, 10)
-
-    # 두 개의 컬럼 생성 (좌측: 커버리지, 우측: 해상도)
-    map_col1, map_col2 = st.columns(2)
-
-    with map_col1:
-        st.markdown("#### 커버리지 맵")
-
-        # 커버리지 맵 생성
-        fig = go.Figure()
-
-        # 커버리지 그리드 계산
-        X, Y, coverage = calculate_coverage_map(
-            st.session_state.cameras if st.session_state.cameras else [],
-            battery_width,
-            battery_height,
-            grid_resolution=grid_res
-        )
-
-        # Heatmap으로 커버리지 표시
-        # 커스텀 컬러스케일: 0=회색, 1=빨강, 2=주황, 3=연두, 4+=초록
-        custom_colorscale = [
-            [0.0, '#404040'],    # 0: 회색
-            [0.2, '#ff6464'],    # 1: 빨강
-            [0.4, '#ffc832'],    # 2: 주황
-            [0.6, '#64c864'],    # 3: 연두
-            [0.8, '#329632'],    # 4: 초록
-            [1.0, '#329632'],    # 4+: 초록
-        ]
-
-        fig.add_trace(go.Heatmap(
-            x=np.arange(0, battery_width + grid_res, grid_res),
-            y=np.arange(0, battery_height + grid_res, grid_res),
-            z=coverage,
-            colorscale=custom_colorscale,
-            zmin=0,
-            zmax=5,
-            showscale=True,
-            colorbar=dict(
-                title="카메라 수",
-                tickvals=[0, 1, 2, 3, 4],
-                ticktext=["0", "1", "2", "3", "4+"],
-                len=0.5,
-            ),
-            hovertemplate="위치: (%{x:.0f}, %{y:.0f})mm<br>카메라 수: %{z}<extra></extra>",
-            xgap=1,
-            ygap=1,
-        ))
-
-        # 배터리 외곽선
-        fig.add_shape(
-            type="rect",
-            x0=0, y0=0,
-            x1=battery_width, y1=battery_height,
-            line=dict(color="white", width=3),
-            fillcolor="rgba(0,0,0,0)",
-        )
-
-        # 각 카메라 footprint 및 위치 표시
-        colors = px.colors.qualitative.Set1
-        for i, cam in enumerate(st.session_state.cameras):
-            color = colors[i % len(colors)]
-
-            # 커버리지 영역 (다각형)
-            polygon = cam.get_coverage_polygon()
-            polygon_closed = np.vstack([polygon, polygon[0]])  # 닫힌 다각형
-
-            # FOV 중심점 계산
-            fov_center_x, fov_center_y = cam.pixel_to_world(
-                (cam.spec.resolution_x - 1) / 2, (cam.spec.resolution_y - 1) / 2
-            )
-
-            fig.add_trace(go.Scatter(
-                x=polygon_closed[:, 0],
-                y=polygon_closed[:, 1],
-                mode='lines',
-                line=dict(color=color, width=2),
-                name=f'CAM {cam.id} 영역',
-                hoverinfo='skip'
-            ))
-
-            # FOV 중심점 표시
-            fig.add_trace(go.Scatter(
-                x=[fov_center_x],
-                y=[fov_center_y],
-                mode='markers',
-                marker=dict(size=8, color=color, symbol='x'),
-                name=f'CAM {cam.id} FOV중심',
-                hovertemplate=f"FOV 중심: ({fov_center_x:.0f}, {fov_center_y:.0f})<extra></extra>"
-            ))
-
-            # 카메라 위치
-            fig.add_trace(go.Scatter(
-                x=[cam.x],
-                y=[cam.y],
-                mode='markers+text',
-                marker=dict(size=15, color=color, symbol='diamond', line=dict(color='black', width=1)),
-                text=[f"CAM{cam.id}"],
-                textposition="top center",
-                name=f'CAM {cam.id}',
-                hovertemplate=f"<b>CAM {cam.id}</b><br>위치: ({cam.x:.0f}, {cam.y:.0f})mm<br>틸트: {cam.tilt_angle:.1f}°<br>방향: {cam.tilt_direction:.1f}°<extra></extra>"
-            ))
-
-            # 틸트 방향 화살표 (카메라 위치 → FOV 중심 방향)
-            if cam.tilt_angle > 0:
-                # FOV 중심 방향으로 화살표
-                arrow_dx = fov_center_x - cam.x
-                arrow_dy = fov_center_y - cam.y
-                arrow_dist = np.sqrt(arrow_dx**2 + arrow_dy**2)
-                if arrow_dist > 0:
-                    # 화살표 길이 정규화 (최소 50, 최대 150)
-                    arrow_len = min(150, max(50, arrow_dist * 0.3))
-                    norm_dx = arrow_dx / arrow_dist * arrow_len
-                    norm_dy = arrow_dy / arrow_dist * arrow_len
-                    fig.add_annotation(
-                        x=cam.x + norm_dx,
-                        y=cam.y + norm_dy,
-                        ax=cam.x,
-                        ay=cam.y,
-                        xref="x",
-                        yref="y",
-                        axref="x",
-                        ayref="y",
-                        showarrow=True,
-                        arrowhead=2,
-                        arrowsize=1.5,
-                        arrowwidth=2,
-                        arrowcolor=color
-                    )
-
-        # 여백 계산 (배터리 크기의 5%)
-        margin_x = battery_width * 0.05
-        margin_y = battery_height * 0.05
-
-        fig.update_layout(
-            xaxis=dict(
-                title="X (mm)",
-                range=[-margin_x, battery_width + margin_x],
-                scaleanchor="y",
-                scaleratio=1,
-                showgrid=True,
-                gridwidth=1,
-                gridcolor='rgba(128,128,128,0.2)',
-            ),
-            yaxis=dict(
-                title="Y (mm)",
-                range=[-margin_y, battery_height + margin_y],
-                showgrid=True,
-                gridwidth=1,
-                gridcolor='rgba(128,128,128,0.2)',
-            ),
-            height=600,
-            showlegend=False,
-            margin=dict(r=20, l=50, t=30, b=50),
-            plot_bgcolor='rgba(40,40,40,1)'
-        )
-
-        st.plotly_chart(fig, use_container_width=True, key="coverage_chart")
-
-    with map_col2:
-        st.markdown("#### 해상도 맵")
-
-        if not st.session_state.cameras:
-            st.info("카메라를 배치하면 해상도 맵이 표시됩니다.")
-        else:
-            # 해상도 맵
-            X_res, Y_res, resolution_map = calculate_resolution_map(
-                st.session_state.cameras,
-                battery_width,
-                battery_height,
-                grid_resolution=30
-            )
-
-            fig_res = go.Figure()
-
-            fig_res.add_trace(go.Heatmap(
-                x=X_res[0],
-                y=Y_res[:, 0],
-                z=resolution_map,
-                colorscale='RdYlGn_r',  # 낮을수록 좋음 (초록)
-                zmin=15,
-                zmax=80,
-                showscale=True,
-                colorbar=dict(title="해상도<br>(mm/px)"),
-                hovertemplate="위치: (%{x:.0f}, %{y:.0f})mm<br>해상도: %{z:.1f} mm/pixel<extra></extra>"
-            ))
-
-            # 배터리 외곽선
-            fig_res.add_shape(
-                type="rect",
-                x0=0, y0=0,
-                x1=battery_width, y1=battery_height,
-                line=dict(color="black", width=2),
-            )
-
-            # 카메라 위치 표시
-            for cam in st.session_state.cameras:
-                fig_res.add_trace(go.Scatter(
-                    x=[cam.x],
-                    y=[cam.y],
-                    mode='markers',
-                    marker=dict(size=10, color='white', symbol='diamond', line=dict(color='black', width=2)),
-                    showlegend=False,
-                    hoverinfo='skip'
-                ))
-
-            fig_res.update_layout(
-                xaxis=dict(
-                    title="X (mm)",
-                    range=[-margin_x, battery_width + margin_x],
-                    scaleanchor="y",
-                    scaleratio=1
-                ),
-                yaxis=dict(
-                    title="Y (mm)",
-                    range=[-margin_y, battery_height + margin_y]
-                ),
-                height=600,
-                margin=dict(r=20, l=50, t=30, b=50),
-            )
-
-            st.plotly_chart(fig_res, use_container_width=True, key="resolution_chart_main")
-
-            # 해상도 통계 표시
-            valid_res = resolution_map[~np.isnan(resolution_map)]
-            if len(valid_res) > 0:
-                stat_col1, stat_col2, stat_col3 = st.columns(3)
-                stat_col1.metric("최소 (최상)", f"{np.min(valid_res):.1f} mm/px")
-                stat_col2.metric("평균", f"{np.mean(valid_res):.1f} mm/px")
-                stat_col3.metric("최대 (최하)", f"{np.max(valid_res):.1f} mm/px")
-
-    # 마우스 클릭 모드일 때 수동 좌표 입력
-    if add_mode == "마우스 클릭":
-        st.markdown("---")
-        st.markdown("**클릭 위치에 카메라 추가** (그래프에서 좌표 확인 후 입력)")
-        col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
-        click_x = col1.number_input("클릭 X", value=battery_width//2, min_value=0, max_value=int(battery_width), key="click_x")
-        click_y = col2.number_input("클릭 Y", value=battery_height//2, min_value=0, max_value=int(battery_height), key="click_y")
-        click_tilt = col3.number_input("틸트 (°)", value=0.0, min_value=0.0, max_value=85.0, key="click_tilt")
-
-        if col4.button("➕ 추가", key="add_click"):
-            cam = Camera(
-                id=st.session_state.next_camera_id,
-                x=click_x,
-                y=click_y,
-                z=working_distance,
-                tilt_angle=click_tilt,
-                spec=camera_spec
-            )
-            _, tilt_dir = auto_tilt_to_center(cam, battery_width, battery_height)
-            cam.tilt_direction = tilt_dir
-            st.session_state.cameras.append(cam)
-            st.session_state.next_camera_id += 1
-            st.rerun()
-
-    # 카메라 목록 (카드형 UI)
-    st.markdown("---")
-    st.markdown(f"### 📷 카메라 목록 ({len(st.session_state.cameras)}개)")
-
-    if st.session_state.cameras:
-        # 카드당 4개씩 행으로 배치
-        cameras_per_row = 4
-        cameras_to_remove = []
-
-        for row_start in range(0, len(st.session_state.cameras), cameras_per_row):
-            row_cameras = st.session_state.cameras[row_start:row_start + cameras_per_row]
-            cols = st.columns(cameras_per_row)
-
-            for col_idx, cam in enumerate(row_cameras):
-                with cols[col_idx]:
-                    # 카드 컨테이너
-                    colors = px.colors.qualitative.Set1
-                    cam_color = colors[(row_start + col_idx) % len(colors)]
-
-                    with st.container(border=True):
-                        # 카메라 헤더
-                        st.markdown(f"**CAM {cam.id}** <span style='color:{cam_color}'>●</span>", unsafe_allow_html=True)
-
-                        # session_state 키에서 값 읽기 (없으면 카메라 값 사용)
-                        key_x = f"card_x_{cam.id}"
-                        key_y = f"card_y_{cam.id}"
-                        key_tilt = f"card_tilt_{cam.id}"
-                        key_dir = f"card_dir_{cam.id}"
-
-                        # 위치 입력
-                        c1, c2 = st.columns(2)
-                        c1.number_input("X", value=float(cam.x), key=key_x,
-                                       min_value=0.0, max_value=float(battery_width), step=10.0, format="%.0f")
-                        c2.number_input("Y", value=float(cam.y), key=key_y,
-                                       min_value=0.0, max_value=float(battery_height), step=10.0, format="%.0f")
-
-                        # 틸트 입력
-                        c3, c4 = st.columns(2)
-                        c3.number_input("틸트°", value=float(cam.tilt_angle), key=key_tilt,
-                                       min_value=0.0, max_value=85.0, step=5.0, format="%.0f")
-                        c4.number_input("방향°", value=float(cam.tilt_direction), key=key_dir,
-                                       min_value=-180.0, max_value=180.0, step=15.0, format="%.0f")
-
-                        # session_state에서 값 읽어서 카메라 업데이트
-                        if key_x in st.session_state:
-                            cam.x = st.session_state[key_x]
-                        if key_y in st.session_state:
-                            cam.y = st.session_state[key_y]
-                        if key_tilt in st.session_state:
-                            cam.tilt_angle = st.session_state[key_tilt]
-                        if key_dir in st.session_state:
-                            cam.tilt_direction = st.session_state[key_dir]
-                        cam.z = working_distance
-                        cam.spec = camera_spec
-
-                        # 삭제 버튼
-                        if st.button("🗑️ 삭제", key=f"card_del_{cam.id}", use_container_width=True):
-                            cameras_to_remove.append(row_start + col_idx)
-
-        # 삭제 처리
-        for idx in sorted(cameras_to_remove, reverse=True):
-            st.session_state.cameras.pop(idx)
-        if cameras_to_remove:
-            st.rerun()
-
-        # 전체 삭제 버튼
-        if st.button("🗑️ 모든 카메라 삭제", key="delete_all_cameras"):
-            st.session_state.cameras = []
-            st.session_state.next_camera_id = 1
-            st.rerun()
+tab2, tab4 = st.tabs(["🎯 3D 뷰", "📋 상세 정보"])
 
 with tab2:
     st.subheader("3D FOV 시각화")
@@ -533,6 +249,81 @@ with tab2:
             st.session_state.cameras = []
             st.session_state.next_camera_id = 1
             st.rerun()
+
+        st.divider()
+
+        # JSON 저장/불러오기
+        st.markdown("##### 설정 저장/불러오기")
+
+        # 저장 버튼
+        if st.session_state.cameras:
+            camera_data = {
+                "battery": {
+                    "width": battery_width,
+                    "height": battery_height
+                },
+                "camera_spec": {
+                    "resolution_x": resolution_x,
+                    "resolution_y": resolution_y,
+                    "fov_h": fov_h,
+                    "fov_v": fov_v,
+                    "working_distance": working_distance
+                },
+                "cameras": [
+                    {
+                        "id": cam.id,
+                        "x": cam.x,
+                        "y": cam.y,
+                        "tilt_angle": cam.tilt_angle,
+                        "tilt_direction": cam.tilt_direction
+                    }
+                    for cam in st.session_state.cameras
+                ]
+            }
+            json_str = json.dumps(camera_data, indent=2, ensure_ascii=False)
+            st.download_button(
+                label="💾 JSON 저장",
+                data=json_str,
+                file_name="camera_config.json",
+                mime="application/json",
+                use_container_width=True
+            )
+
+        # 불러오기
+        uploaded_file = st.file_uploader("📂 JSON 불러오기", type=["json"], key="json_upload")
+
+        # 파일 처리 상태 추적
+        if 'last_uploaded_file' not in st.session_state:
+            st.session_state.last_uploaded_file = None
+
+        if uploaded_file is not None and uploaded_file.name != st.session_state.last_uploaded_file:
+            try:
+                loaded_data = json.load(uploaded_file)
+                st.session_state.cameras = []
+                st.session_state.next_camera_id = 1
+                st.session_state.last_uploaded_file = uploaded_file.name
+
+                # JSON에서 working_distance 읽기
+                loaded_wd = loaded_data.get("camera_spec", {}).get("working_distance", working_distance)
+                st.session_state.working_distance = loaded_wd
+
+                for cam_data in loaded_data.get("cameras", []):
+                    cam = Camera(
+                        id=st.session_state.next_camera_id,
+                        x=cam_data["x"],
+                        y=cam_data["y"],
+                        z=loaded_wd,
+                        tilt_angle=cam_data.get("tilt_angle", 0),
+                        tilt_direction=cam_data.get("tilt_direction", 0),
+                        spec=camera_spec
+                    )
+                    st.session_state.cameras.append(cam)
+                    st.session_state.next_camera_id += 1
+
+                st.success(f"✅ {len(st.session_state.cameras)}개 카메라 로드됨 (WD: {loaded_wd}mm)")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ 파일 로드 실패: {e}")
 
         st.divider()
 
@@ -609,12 +400,12 @@ with tab2:
 
         # 해상도 히트맵 (Z=0 평면)
         if st.session_state.cameras:
-            # 해상도 맵 계산
-            heatmap_res = 50  # 히트맵 그리드 해상도
-            X_hm, Y_hm, res_map = calculate_resolution_map(
-                st.session_state.cameras,
-                battery_width, battery_height,
-                grid_resolution=heatmap_res
+            # 해상도 맵 계산 (캐시 사용, 15=빠름)
+            heatmap_res = 15
+            cam_hash = get_cameras_hash(st.session_state.cameras)
+            cam_data = cameras_to_data(st.session_state.cameras)
+            X_hm, Y_hm, res_map = cached_resolution_map(
+                cam_hash, battery_width, battery_height, heatmap_res, cam_data
             )
 
             # NaN을 큰 값으로 대체 (커버되지 않는 영역)
@@ -746,7 +537,7 @@ with tab2:
                         hoverinfo='skip'
                     ))
 
-        # 레이아웃 설정 - FOV가 배터리 면을 벗어나도 표시되도록 동적 범위 계산
+        # 레이아웃 설정 - 원점 (0,0)에서 시작, FOV가 배터리 면을 벗어나도 표시
         x_min, x_max = 0, battery_width
         y_min, y_max = 0, battery_height
 
@@ -760,21 +551,24 @@ with tab2:
                     y_min = min(y_min, corner[1])
                     y_max = max(y_max, corner[1])
 
-        # 약간의 여백 추가
-        margin_x = (x_max - x_min) * 0.1
-        margin_y = (y_max - y_min) * 0.1
-        x_min -= max(margin_x, 100)
-        x_max += max(margin_x, 100)
-        y_min -= max(margin_y, 100)
-        y_max += max(margin_y, 100)
+        # 여백 추가 (음수 방향도 포함)
+        x_min = min(0, x_min - 100)
+        x_max += 100
+        y_min = min(0, y_min - 100)
+        y_max += 100
 
         fig_3d.update_layout(
             scene=dict(
                 xaxis=dict(title='X (mm)', range=[x_min, x_max]),
                 yaxis=dict(title='Y (mm)', range=[y_min, y_max]),
-                zaxis=dict(title='Z (mm)', range=[-50, working_distance + 100]),
+                zaxis=dict(title='Z (mm)', range=[0, working_distance + 100]),
                 aspectmode='data',
-                bgcolor='rgb(30, 30, 30)'
+                bgcolor='rgb(30, 30, 30)',
+                camera=dict(
+                    eye=dict(x=1.5, y=-1.5, z=1.2),
+                    center=dict(x=0, y=0, z=-0.1)
+                ),
+                dragmode='turntable'
             ),
             height=700,
             margin=dict(r=20, l=20, t=40, b=20),
@@ -804,117 +598,6 @@ with tab2:
                 stat_cols[0].metric("최소 해상도 (최상)", f"{np.min(valid_res):.1f} mm/px")
                 stat_cols[1].metric("평균 해상도", f"{np.mean(valid_res):.1f} mm/px")
                 stat_cols[2].metric("최대 해상도 (최하)", f"{np.max(valid_res):.1f} mm/px")
-
-with tab3:
-    st.subheader("픽셀 해상도 분석")
-
-    if not st.session_state.cameras:
-        st.warning("카메라를 먼저 배치해주세요.")
-    else:
-        # 해상도 맵
-        X, Y, resolution_map = calculate_resolution_map(
-            st.session_state.cameras,
-            battery_width,
-            battery_height,
-            grid_resolution=30
-        )
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.markdown("#### 전체 해상도 맵")
-            fig_res = go.Figure()
-
-            fig_res.add_trace(go.Heatmap(
-                x=X[0],
-                y=Y[:, 0],
-                z=resolution_map,
-                colorscale='RdYlGn_r',  # 낮을수록 좋음 (초록)
-                zmin=15,
-                zmax=80,
-                showscale=True,
-                colorbar=dict(title="해상도<br>(mm/pixel)"),
-                hovertemplate="위치: (%{x:.0f}, %{y:.0f})mm<br>해상도: %{z:.1f} mm/pixel<extra></extra>"
-            ))
-
-            # 배터리 외곽선
-            fig_res.add_shape(
-                type="rect",
-                x0=0, y0=0,
-                x1=battery_width, y1=battery_height,
-                line=dict(color="black", width=2),
-            )
-
-            # 카메라 위치 표시
-            for cam in st.session_state.cameras:
-                fig_res.add_trace(go.Scatter(
-                    x=[cam.x],
-                    y=[cam.y],
-                    mode='markers',
-                    marker=dict(size=10, color='white', symbol='diamond', line=dict(color='black', width=2)),
-                    showlegend=False,
-                    hoverinfo='skip'
-                ))
-
-            fig_res.update_layout(
-                xaxis=dict(title="X (mm)", scaleanchor="y", scaleratio=1),
-                yaxis=dict(title="Y (mm)"),
-                height=500,
-            )
-
-            st.plotly_chart(fig_res, use_container_width=True)
-
-        with col2:
-            st.markdown("#### 카메라별 픽셀 해상도")
-
-            # 각 카메라의 픽셀별 해상도 그래프
-            selected_cam = st.selectbox(
-                "카메라 선택",
-                options=range(len(st.session_state.cameras)),
-                format_func=lambda i: f"CAM {st.session_state.cameras[i].id}"
-            )
-
-            cam = st.session_state.cameras[selected_cam]
-
-            # 픽셀별 해상도 계산 (배터리 영역 내 픽셀만)
-            res_grid = np.zeros((cam.spec.resolution_x - 1, cam.spec.resolution_y - 1))
-            for px in range(cam.spec.resolution_x - 1):
-                for py in range(cam.spec.resolution_y - 1):
-                    # 픽셀 위치가 배터리 영역 내인지 확인
-                    world_x, world_y = cam.pixel_to_world(px + 0.5, py + 0.5)
-                    if world_x is None or not (0 <= world_x <= battery_width and 0 <= world_y <= battery_height):
-                        res_grid[px, py] = np.nan
-                        continue
-
-                    res_x, res_y = cam.calculate_pixel_resolution(px, py)
-                    res_grid[px, py] = (res_x + res_y) / 2 if res_x != float('inf') else np.nan
-
-            fig_cam_res = go.Figure()
-            fig_cam_res.add_trace(go.Heatmap(
-                z=res_grid.T,  # transpose for correct orientation
-                colorscale='RdYlGn_r',
-                showscale=True,
-                colorbar=dict(title="mm/pixel"),
-                hovertemplate="픽셀 (%{x}, %{y})<br>해상도: %{z:.1f} mm/pixel<extra></extra>"
-            ))
-
-            fig_cam_res.update_layout(
-                title=f"CAM {cam.id} 픽셀별 해상도",
-                xaxis=dict(title="픽셀 X (0-31)"),
-                yaxis=dict(title="픽셀 Y (0-23)"),
-                height=400,
-            )
-
-            st.plotly_chart(fig_cam_res, use_container_width=True)
-
-            # 해상도 통계
-            valid_res = res_grid[~np.isnan(res_grid)]
-            if len(valid_res) > 0:
-                st.markdown("##### 해상도 통계")
-                col_a, col_b, col_c = st.columns(3)
-                col_a.metric("최소 (최상)", f"{np.min(valid_res):.1f} mm/px")
-                col_b.metric("평균", f"{np.mean(valid_res):.1f} mm/px")
-                col_c.metric("최대 (최하)", f"{np.max(valid_res):.1f} mm/px")
 
 with tab4:
     st.subheader("상세 정보")

@@ -1,0 +1,43 @@
+{
+  "battery": {
+    "width": 1700,
+    "height": 2800
+  },
+  "camera_spec": {
+    "resolution_x": 32,
+    "resolution_y": 24,
+    "fov_h": 110.0,
+    "fov_v": 75.0,
+    "working_distance": 500
+  },
+  "cameras": [
+    {
+      "id": 1,
+      "x": 425.0,
+      "y": 700.0,
+      "tilt_angle": 0.0,
+      "tilt_direction": 90.0
+    },
+    {
+      "id": 2,
+      "x": 1275.0,
+      "y": 700.0,
+      "tilt_angle": 0.0,
+      "tilt_direction": 90.0
+    },
+    {
+      "id": 3,
+      "x": 425.0,
+      "y": 2100.0,
+      "tilt_angle": 0.0,
+      "tilt_direction": 90.0
+    },
+    {
+      "id": 4,
+      "x": 1275.0,
+      "y": 2100.0,
+      "tilt_angle": 0.0,
+      "tilt_direction": 90.0
+    }
+  ]
+}
